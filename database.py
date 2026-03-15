@@ -155,7 +155,40 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_schedule_day 
                 ON schedule(day_of_week)
             ''')
-            
+            # ────────────────────────────────────────────────
+            # НОВОЕ: Таблица мероприятий (Фаза 2)
+            # ────────────────────────────────────────────────
+            await cursor.execute('''
+                CREATE TABLE IF NOT EXISTS events (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source      TEXT    NOT NULL,
+                    title       TEXT    NOT NULL,
+                    description TEXT,
+                    url         TEXT    NOT NULL UNIQUE,  -- UNIQUE для дедупликации
+                    date_start  TEXT,
+                    date_end    TEXT,
+                    topics_json TEXT    DEFAULT '[]',     -- JSON: ["python", "вебинар"]
+                    created_at  TEXT    DEFAULT (datetime('now')),
+                    notified_at TEXT    DEFAULT NULL      -- NULL = ещё не разослано
+                )
+            ''')
+
+            await cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_events_notify
+                ON events (notified_at, date_start)
+            ''')
+
+            # ────────────────────────────────────────────────
+            # НОВОЕ: Таблица тем групп (Фаза 2)
+            # ────────────────────────────────────────────────
+            await cursor.execute('''
+                CREATE TABLE IF NOT EXISTS group_topics (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_name    TEXT    NOT NULL UNIQUE,
+                    keywords_json TEXT    DEFAULT '[]'   -- JSON: ["python", "программирование"]
+                )
+            ''')
+
             await self.conn.commit()
             
     async def add_user(self, user_id: int, username: str = None,
@@ -338,12 +371,16 @@ class Database:
                 logger.info(f"Очищено старых записей расписания: {deleted}")
 
             # Загружаем актуальные данные
+            normalized_data = [
+                (group_name, day_of_week.lower(), lesson_time)
+                for group_name, day_of_week, lesson_time in data
+            ]
             await cursor.executemany('''
                 INSERT INTO schedule (group_name, day_of_week, lesson_time)
                 VALUES (?, ?, ?)
-            ''', data)
+            ''', normalized_data)
             await self.conn.commit()
-            logger.info(f"Загружено новых записей расписания: {len(data)}")
+            logger.info(f"Загружено новых записей расписания: {len(normalized_data)}")
             
     async def bulk_add_users(self, data: List[tuple]):
         """
@@ -385,6 +422,140 @@ class Database:
         if self.conn:
             await self.conn.close()
             logger.info("Соединение с базой данных закрыто")
+
+    async def add_event(self, event: dict) -> bool:
+        """
+        Сохраняет мероприятие в БД.
+        Возвращает True если добавлено, False если дубликат (url уже есть).
+        Использует INSERT OR IGNORE — при совпадении url просто пропускает.
+        """
+        import json
+        from urllib.parse import urlparse, urlencode, parse_qsl
+
+        # Очищаем URL от UTM-меток для надёжной дедупликации
+        url = event.get('url', '')
+        parsed = urlparse(url)
+        clean_params = [(k, v) for k, v in parse_qsl(parsed.query)
+                        if not k.startswith('utm_')]
+        clean_url = parsed._replace(query=urlencode(clean_params)).geturl().rstrip('/')
+
+        async with self.conn.cursor() as cursor:
+            await cursor.execute('''
+                INSERT OR IGNORE INTO events
+                    (source, title, description, url, date_start, date_end, topics_json)
+                VALUES
+                    (:source, :title, :description, :url,
+                     :date_start, :date_end, :topics_json)
+            ''', {
+                'source': event.get('source', ''),
+                'title': event.get('title', ''),
+                'description': event.get('description', ''),
+                'url': clean_url,
+                'date_start': event.get('date_start'),
+                'date_end': event.get('date_end'),
+                'topics_json': json.dumps(
+                    event.get('topics', []), ensure_ascii=False
+                ),
+            })
+            await self.conn.commit()
+            return cursor.rowcount > 0  # True = добавлено, False = дубликат
+
+
+    async def get_unnotified_events(self) -> List[Dict]:
+        """
+        Возвращает предстоящие мероприятия, которые ещё не были разосланы.
+        notified_at IS NULL — значит рассылка ещё не делалась.
+        """
+        import json
+        async with self.conn.cursor() as cursor:
+            await cursor.execute('''
+                SELECT id, title, description, url, date_start, topics_json
+                FROM events
+                WHERE notified_at IS NULL
+                    AND (date_start IS NULL
+                        OR date_start > datetime('now'))
+                ORDER BY date_start ASC
+                ''')
+            rows = await cursor.fetchall()
+
+        result = []
+        for row in rows:
+            result.append({
+                'id': row['id'],
+                'title': row['title'],
+                'description': row['description'],
+                'url': row['url'],
+                'date_start': row['date_start'],
+                'topics': json.loads(row['topics_json'] or '[]'),
+             })
+        return result
+
+
+    async def mark_event_notified(self, event_id: int):
+        """
+        Проставляет время рассылки. После этого событие не попадёт
+        в get_unnotified_events() — повторной отправки не будет.
+        Вызывать ПОСЛЕ успешной отправки уведомлений.
+        """
+        async with self.conn.cursor() as cursor:
+            await cursor.execute('''
+                UPDATE events
+                SET notified_at = datetime('now')
+                WHERE id = ?
+            ''', (event_id,))
+            await self.conn.commit()
+
+
+    async def upsert_group_topics(self, group_name: str, keywords: list):
+        """
+        Добавляет группу или обновляет её ключевые слова.
+        ON CONFLICT ... DO UPDATE — безопасно вызывать повторно.
+        Именно так работают все upsert-операции в SQLite.
+        """
+        import json
+        async with self.conn.cursor() as cursor:
+            await cursor.execute('''
+                INSERT INTO group_topics (group_name, keywords_json)
+                VALUES (:group_name, :keywords_json)
+                ON CONFLICT(group_name) DO UPDATE
+                    SET keywords_json = excluded.keywords_json
+            ''', {
+                'group_name': group_name,
+                'keywords_json': json.dumps(keywords, ensure_ascii=False),
+            })
+            await self.conn.commit()
+
+
+    async def find_matching_groups(self, event_topics: list) -> List[str]:
+        """
+        По темам события возвращает список групп, которым оно релевантно.
+        Сравнение без учёта регистра: 'Python' == 'python'.
+
+        Пример: event_topics = ['python', 'вебинар']
+        Вернёт: ['Пайтон для начинающих']
+        """
+        import json
+        if not event_topics:
+            return []
+
+        async with self.conn.cursor() as cursor:
+            await cursor.execute(
+                'SELECT group_name, keywords_json FROM group_topics'
+            )
+            rows = await cursor.fetchall()
+
+        # Множество тем события в нижнем регистре
+        event_set = {t.lower() for t in event_topics}
+        matched = []
+
+        for row in rows:
+            keywords = json.loads(row['keywords_json'] or '[]')
+            group_set = {k.lower() for k in keywords}
+            # Если есть хоть одно общее слово — группа получит уведомление
+            if event_set & group_set:
+                matched.append(row['group_name'])
+
+        return matched
 
 
 

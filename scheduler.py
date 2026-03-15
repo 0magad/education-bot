@@ -178,10 +178,11 @@ class Scheduler:
                     if time_since_last.total_seconds() >= self.config.REMINDER_INTERVAL:
                         should_send_general = True
                         last_general_reminder_time = current_time
-                
+
                 if should_send_general:
                     await self._send_reminders()
-                
+                    await self.send_event_notifications()
+
                 # Ждем короткий интервал перед следующей проверкой расписания
                 await asyncio.sleep(self.config.SCHEDULE_CHECK_INTERVAL)
             except asyncio.CancelledError:
@@ -427,5 +428,82 @@ class Scheduler:
         message_index = user['user_id'] % len(messages)
         return messages[message_index]
 
+    async def send_event_notifications(self):
+        """
+        Рассылает уведомления о новых мероприятиях.
+        Вызывать раз в день из планировщика.
+        """
+        if not self.bot:
+            return
+
+        try:
+            # Берём все неразосланные предстоящие мероприятия
+            events = await self.db.get_unnotified_events()
+            if not events:
+                logger.info('Нет новых мероприятий для рассылки')
+                return
+
+            sent_total = 0
+
+            for event in events:
+                # Находим группы, которым релевантно это мероприятие
+                matched_groups = await self.db.find_matching_groups(event['topics'])
+
+                if not matched_groups:
+                    # Никаким группам не подходит — помечаем чтобы не проверять снова
+                    await self.db.mark_event_notified(event['id'])
+                    continue
+
+                # Собираем всех студентов из совпавших групп
+                recipients = []
+                for group_name in matched_groups:
+                    students = await self.db.get_students_by_group(group_name)
+                    recipients.extend(students)
+
+                # Убираем дубли (студент может быть в нескольких группах)
+                seen_ids = set()
+                unique_recipients = []
+                for s in recipients:
+                    if s['user_id'] not in seen_ids:
+                        seen_ids.add(s['user_id'])
+                        unique_recipients.append(s)
+
+                # Формируем сообщение
+                date_str = ''
+                if event.get('date_start'):
+                    try:
+                        from datetime import datetime as dt
+                        d = dt.fromisoformat(event['date_start'])
+                        date_str = f"\n📅 {d.strftime('%d.%m.%Y, %H:%M')}"
+                    except Exception:
+                        date_str = f"\n📅 {event['date_start']}"
+
+                message = (
+                    f"🎓 Мероприятие по вашей теме!\n\n"
+                    f"📌 {event['title']}{date_str}\n"
+                    f"🔗 {event['url']}"
+                )
+
+                # Отправляем каждому студенту
+                for student in unique_recipients:
+                    try:
+                        await self.bot.send_message(
+                            chat_id=student['user_id'],
+                            text=message
+                        )
+                        sent_total += 1
+                        await asyncio.sleep(0.05)  # защита от flood control
+                    except TelegramError as e:
+                        logger.warning(
+                            f'Не удалось отправить пользователю {student["user_id"]}: {e}'
+                        )
+
+                # Помечаем как разосланное
+                await self.db.mark_event_notified(event['id'])
+
+            logger.info(f'Разослано уведомлений о мероприятиях: {sent_total}')
+
+        except Exception as e:
+            logger.error(f'Ошибка рассылки мероприятий: {e}', exc_info=True)
 
 
