@@ -1,0 +1,30 @@
+# organization.yaml — настройки образовательного бота
+# Токены и API-ключи — только в .env
+
+bot:
+  reminder_interval: 7200        # секунд (2 часа)
+  schedule_check_interval: 60    # секунд (проверка расписания)
+  log_level: INFO
+
+ai:
+  provider: ollama               # groq | gemini | openai | ollama
+  model: ""                      # пусто = авто по провайдеру
+  ollama:
+    base_url: http://localhost:11434
+    model: llama3.1
+
+admins:
+  user_ids: []
+  usernames: []
+
+groups:
+  default: []
+
+messages:
+  welcome: ""
+  help: ""
+  reminder: []
+  notification: {}
+
+database:
+  path: data/bot.db
