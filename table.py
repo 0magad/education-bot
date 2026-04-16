@@ -2,28 +2,34 @@ import sys
 import asyncio
 import logging
 import json
+from datetime import datetime
 from pathlib import Path
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QTableWidget, QTableWidgetItem, 
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QTableWidget, QTableWidgetItem,
                              QPushButton, QVBoxLayout, QWidget, QHBoxLayout, QMessageBox,
-                             QLabel, QHeaderView, QTabWidget, QComboBox)
+                             QLabel, QHeaderView, QTabWidget, QComboBox, QScrollArea,
+                             QFileDialog)
 from PyQt5.QtCore import Qt, QTimer
 from database import Database
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-GROUPS = [
-    "VR/AR приложения",
-    "3D моделирование",
-    "Инженерная графика",
-    "Основы графического дизайна",
-    "Пайтон для начинающих",
-    "Архитектура и дизайн",
-    "Интеллект-школа. История.9-11 классы",
-    "Интеллект школа. Русский язык. (7-8 классы)",
-    "Концепт-арт: Создание 3D-персонажа",
-    "Основы веб-программирования",
-]
+
+def _load_groups_from_config() -> list:
+    """Загрузить список групп из organization.yaml / groups.yaml (TASK 3.2)."""
+    try:
+        from config import Config
+        groups = Config.get_groups_list()
+        if groups:
+            logger.info(f"Загружено {len(groups)} групп из конфигурации")
+            return groups
+    except Exception as e:
+        logger.warning(f"Не удалось загрузить группы из конфига: {e}")
+    logger.warning("Список групп пуст — добавьте группы в organization.yaml (groups.default)")
+    return []
+
+
+GROUPS = _load_groups_from_config()
 
 DAYS_OF_WEEK = [
     "понедельник",
@@ -166,7 +172,40 @@ class MainWindow(QMainWindow):
         schedule_layout.addLayout(schedule_buttons)
         
         self.tabs.addTab(self.schedule_tab, "📅 Расписание")
-        
+
+        # ── Вкладка 3: Статистика (5.3) ────────────────────────────────────────
+        self.analytics_tab = QWidget()
+        analytics_layout = QVBoxLayout(self.analytics_tab)
+
+        analytics_header = QLabel("📊 Статистика организации")
+        analytics_header.setStyleSheet("font-size: 14px; font-weight: bold; padding: 8px;")
+        analytics_layout.addWidget(analytics_header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+
+        self.stats_label = QLabel("Нажмите «Обновить» для загрузки статистики.")
+        self.stats_label.setWordWrap(True)
+        self.stats_label.setStyleSheet(
+            "padding: 12px; background-color: #f8f9fa; border-radius: 5px; font-size: 13px;"
+        )
+        self.stats_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        scroll_layout.addWidget(self.stats_label)
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_content)
+        analytics_layout.addWidget(scroll)
+
+        refresh_btn = QPushButton("🔄 Обновить статистику")
+        refresh_btn.setStyleSheet(
+            "background-color: #17a2b8; color: white; padding: 8px; border-radius: 5px;"
+        )
+        refresh_btn.clicked.connect(self.refresh_statistics)
+        analytics_layout.addWidget(refresh_btn)
+
+        self.tabs.addTab(self.analytics_tab, "📊 Статистика")
+
         layout.addWidget(self.tabs)
 
         # Общие кнопки
@@ -202,7 +241,24 @@ class MainWindow(QMainWindow):
         """)
         self.button_add.clicked.connect(self.load_data_to_database)
 
+        # Кнопка экспорта в Excel (5.3)
+        self.button_export = QPushButton("📤 Экспорт в Excel")
+        self.button_export.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                padding: 10px;
+                border-radius: 5px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #138496;
+            }
+        """)
+        self.button_export.clicked.connect(self.export_to_excel)
+
         button_layout.addWidget(self.button_save)
+        button_layout.addWidget(self.button_export)
         button_layout.addStretch()
         button_layout.addWidget(self.button_add)
 
@@ -338,7 +394,7 @@ class MainWindow(QMainWindow):
 
                 user_id = int(user_id_str)
 
-                if group_name not in GROUPS:
+                if GROUPS and group_name not in GROUPS:
                     logger.warning(f"Строка {row + 1}: неизвестная группа '{group_name}'")
                     continue
 
@@ -379,7 +435,7 @@ class MainWindow(QMainWindow):
                 if not all([group_name, day_of_week, lesson_time]):
                     continue
 
-                if group_name not in GROUPS:
+                if GROUPS and group_name not in GROUPS:
                     logger.warning(f"Строка {row + 1}: неизвестная группа '{group_name}'")
                     continue
 
@@ -448,6 +504,12 @@ class MainWindow(QMainWindow):
             await self.db.bulk_add_schedule(schedule_data)
             logger.info(f"Загружено {len(schedule_data)} занятий")
 
+            # Логируем действие администратора (5.3)
+            await self.db.log_admin_action(
+                'load_data',
+                f'users={len(users_data)}, schedule={len(schedule_data)}'
+            )
+
             # Подсчитываем связи
             group_counts = {}
             for _, group_name, _, _, _, _ in users_data:
@@ -473,7 +535,30 @@ class MainWindow(QMainWindow):
             return False, f"Ошибка: {str(e)}"
 
     def load_data_to_database(self):
-        """Загрузка данных в базу данных (синхронная обертка)"""
+        """Загрузка данных в базу данных с подтверждением (5.4)"""
+        # Читаем настройку подтверждения из конфига
+        confirm_required = True
+        try:
+            from config import Config
+            confirm_required = Config.load_organization_config().get(
+                'admin', {}
+            ).get('confirm_bulk_actions', True)
+        except Exception:
+            pass
+
+        if confirm_required:
+            reply = QMessageBox.question(
+                self,
+                "Подтверждение загрузки",
+                "⚠️ Расписание будет полностью заменено данными из таблицы.\n\n"
+                "Продолжить загрузку в базу данных?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                self.status_label.setText("Загрузка отменена")
+                return
+
         self.status_label.setText("Загрузка данных...")
         self.button_add.setEnabled(False)
 
@@ -602,6 +687,156 @@ class MainWindow(QMainWindow):
             self.save_all_data()
         except:
             pass  # Игнорируем ошибки автосохранения
+
+    # ── Аналитика (5.3) ────────────────────────────────────────────────────────
+
+    def refresh_statistics(self):
+        """Обновить вкладку статистики."""
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            stats = loop.run_until_complete(self._load_statistics_async())
+            loop.close()
+            self.stats_label.setText(self._format_statistics(stats))
+        except Exception as e:
+            self.stats_label.setText(f"❌ Ошибка загрузки статистики: {e}")
+
+    async def _load_statistics_async(self) -> dict:
+        if not self.db_initialized:
+            self.db = Database()
+            await self.db.init_db()
+            self.db_initialized = True
+        return await self.db.get_statistics()
+
+    @staticmethod
+    def _format_statistics(stats: dict) -> str:
+        lines = [
+            f"👥 Всего учащихся: {stats.get('total_users', 0)}",
+            "",
+            "📊 По группам:",
+        ]
+        for group, cnt in stats.get('users_by_group', {}).items():
+            lines.append(f"  • {group}: {cnt} чел.")
+        lines += [
+            "",
+            f"📅 Записей расписания: {stats.get('schedule_records', 0)}",
+            f"🤖 Запросов к AI: {stats.get('ai_queries', 0)}",
+        ]
+        last_load = stats.get('last_load')
+        if last_load:
+            lines.append(f"\n🔄 Последняя загрузка данных: {last_load}")
+        feedback = stats.get('ai_feedback', {})
+        if feedback:
+            understood     = feedback.get('understood', 0)
+            not_understood = feedback.get('not_understood', 0)
+            lines += [
+                "",
+                "📈 Оценки ответов AI:",
+                f"  ✅ Понял: {understood}",
+                f"  ❌ Не понял: {not_understood}",
+            ]
+        return "\n".join(lines)
+
+    # ── Экспорт в Excel (5.3) ───────────────────────────────────────────────
+
+    def export_to_excel(self):
+        """Экспорт данных из БД в Excel-файл."""
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить Excel",
+            f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            "Excel Files (*.xlsx)"
+        )
+        if not save_path:
+            return
+
+        self.status_label.setText("Экспорт данных...")
+        self.button_export.setEnabled(False)
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            success, message = loop.run_until_complete(self._export_async(save_path))
+            loop.close()
+
+            if success:
+                QMessageBox.information(self, "Экспорт завершён", f"✅ Файл сохранён:\n{save_path}")
+                self.status_label.setText("✓ Экспорт завершён")
+                self.status_label.setStyleSheet(
+                    "padding: 5px; background-color: #d4edda; border-radius: 3px; color: #155724;"
+                )
+            else:
+                QMessageBox.warning(self, "Ошибка экспорта", message)
+                self.status_label.setText(f"✗ {message}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
+            self.status_label.setText(f"✗ Ошибка экспорта: {e}")
+        finally:
+            self.button_export.setEnabled(True)
+
+    async def _export_async(self, filepath: str):
+        """Асинхронный экспорт в Excel."""
+        try:
+            import openpyxl
+        except ImportError:
+            return False, "openpyxl не установлен. Выполните: pip install openpyxl"
+
+        if not self.db_initialized:
+            self.db = Database()
+            await self.db.init_db()
+            self.db_initialized = True
+
+        wb = openpyxl.Workbook()
+
+        # Лист 1: Учащиеся
+        ws_users = wb.active
+        ws_users.title = "Учащиеся"
+        ws_users.append(["User ID", "ФИО", "Группа", "Дата добавления"])
+        async with self.db.conn.cursor() as cur:
+            await cur.execute(
+                'SELECT user_id, full_name, group_name, created_at '
+                'FROM users WHERE is_active = 1 ORDER BY group_name, full_name'
+            )
+            for row in await cur.fetchall():
+                ws_users.append([
+                    row['user_id'],
+                    row['full_name'] or '',
+                    row['group_name'] or '',
+                    str(row['created_at'] or ''),
+                ])
+
+        # Лист 2: Расписание
+        ws_sched = wb.create_sheet("Расписание")
+        ws_sched.append(["Группа", "День недели", "Время"])
+        async with self.db.conn.cursor() as cur:
+            await cur.execute(
+                'SELECT group_name, day_of_week, lesson_time FROM schedule '
+                'ORDER BY group_name, day_of_week, lesson_time'
+            )
+            for row in await cur.fetchall():
+                ws_sched.append([row['group_name'], row['day_of_week'], row['lesson_time']])
+
+        # Лист 3: Статистика
+        ws_stats = wb.create_sheet("Статистика")
+        stats = await self.db.get_statistics()
+        ws_stats.append(["Показатель", "Значение"])
+        ws_stats.append(["Всего учащихся", stats.get('total_users', 0)])
+        ws_stats.append(["Записей расписания", stats.get('schedule_records', 0)])
+        ws_stats.append(["Запросов к AI", stats.get('ai_queries', 0)])
+        ws_stats.append(["Последняя загрузка", stats.get('last_load') or '—'])
+        for group, cnt in stats.get('users_by_group', {}).items():
+            ws_stats.append([f"Группа: {group}", cnt])
+
+        # Авто-ширина колонок
+        for ws in wb.worksheets:
+            for col in ws.columns:
+                max_len = max((len(str(cell.value or '')) for cell in col), default=0)
+                ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 50)
+
+        wb.save(filepath)
+
+        # Логируем действие
+        await self.db.log_admin_action('export_excel', f'file={filepath}')
+
+        return True, "OK"
 
     def closeEvent(self, event):
         """Закрытие приложения"""
