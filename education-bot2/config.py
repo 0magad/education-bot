@@ -1,0 +1,52 @@
+"""
+Конфигурация бота
+"""
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class Config:
+    """Класс для хранения конфигурации"""
+    
+    # Токен бота (должен быть в .env файле)
+    BOT_TOKEN = os.getenv('BOT_TOKEN', '')
+    
+    # Интервал отправки напоминаний (в секундах)
+    REMINDER_INTERVAL = 2 * 60 * 60  # 2 часа
+    
+    # Интервал проверки расписания (в секундах) - для быстрой реакции на изменения
+    SCHEDULE_CHECK_INTERVAL = 60  # 1 минута
+    
+    # Настройки базы данных
+    DB_PATH = os.getenv('DB_PATH', 'data/bot.db')
+    
+    # Настройки AI - выбор провайдера
+    # Варианты: 'groq' (бесплатный, быстрый), 'gemini' (бесплатный), 'openai' (платный), 'ollama' (локальная модель)
+    AI_PROVIDER = os.getenv('AI_PROVIDER', 'ollama')  # По умолчанию Ollama (локальная модель)
+    
+    # API ключи для разных провайдеров
+    AI_API_KEY = os.getenv('AI_API_KEY', '')  # Для OpenAI или Groq
+    GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')  # Для Google Gemini
+    GROQ_API_KEY = os.getenv('GROQ_API_KEY', '')  # Для Groq (приоритет над AI_API_KEY)
+    
+    # Настройки Ollama (локальная модель)
+    OLLAMA_BASE_URL = os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')  # URL Ollama сервера
+    OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'llama3.1')  # Модель Ollama
+    
+    # Модели для разных провайдеров
+    AI_MODEL = os.getenv('AI_MODEL', '')  # Автоматически выбирается по провайдеру
+    
+    # Настройки логирования
+    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+    
+    @classmethod
+    def validate(cls):
+        """Проверка наличия обязательных параметров"""
+        if not cls.BOT_TOKEN:
+            raise ValueError("BOT_TOKEN не установлен в переменных окружения")
+        return True
+
+
+
