@@ -156,8 +156,30 @@ class Database:
                 ON schedule(day_of_week)
             ''')
             
+            # Таблица логов действий администратора (5.3)
+            await cursor.execute('''
+                CREATE TABLE IF NOT EXISTS admin_logs (
+                    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action TEXT NOT NULL,
+                    details TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Таблица обратной связи по ответам AI (5.2)
+            await cursor.execute('''
+                CREATE TABLE IF NOT EXISTS ai_feedback (
+                    feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    conversation_id INTEGER,
+                    feedback TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            ''')
+
             await self.conn.commit()
-            
+
     async def add_user(self, user_id: int, username: str = None,
                        first_name: str = None, last_name: str = None,
                        full_name: str = None, group_name: str = None, class_level: int = None):
@@ -380,6 +402,97 @@ class Database:
         """Совместимость: раньше выборка шла по предмету. Теперь subject == group_name."""
         return await self.get_students_by_group(subject)
             
+    async def log_admin_action(self, action: str, details: str = None):
+        """Логирование действия администратора (5.3)"""
+        async with self.conn.cursor() as cursor:
+            await cursor.execute('''
+                INSERT INTO admin_logs (action, details) VALUES (?, ?)
+            ''', (action, details))
+            await self.conn.commit()
+
+    async def log_ai_feedback(self, user_id: int, conversation_id: int, feedback: str):
+        """Сохранение оценки пользователем ответа AI (5.2)"""
+        async with self.conn.cursor() as cursor:
+            await cursor.execute('''
+                INSERT INTO ai_feedback (user_id, conversation_id, feedback)
+                VALUES (?, ?, ?)
+            ''', (user_id, conversation_id, feedback))
+            await self.conn.commit()
+
+    async def get_statistics(self) -> dict:
+        """Получение статистики для вкладки «Аналитика» (5.3)"""
+        stats: dict = {}
+        async with self.conn.cursor() as cursor:
+            # Всего активных пользователей
+            await cursor.execute('SELECT COUNT(*) as cnt FROM users WHERE is_active = 1')
+            stats['total_users'] = (await cursor.fetchone())['cnt']
+
+            # Пользователи по группам
+            await cursor.execute('''
+                SELECT group_name, COUNT(*) as cnt FROM users
+                WHERE is_active = 1 AND group_name IS NOT NULL AND group_name != ""
+                GROUP BY group_name ORDER BY group_name
+            ''')
+            stats['users_by_group'] = {row['group_name']: row['cnt'] for row in await cursor.fetchall()}
+
+            # Записей расписания
+            await cursor.execute('SELECT COUNT(*) as cnt FROM schedule')
+            stats['schedule_records'] = (await cursor.fetchone())['cnt']
+
+            # Всего запросов к AI
+            await cursor.execute('SELECT COUNT(*) as cnt FROM ai_conversations')
+            stats['ai_queries'] = (await cursor.fetchone())['cnt']
+
+            # Последняя загрузка данных
+            await cursor.execute('''
+                SELECT timestamp FROM admin_logs
+                WHERE action LIKE '%load%' ORDER BY timestamp DESC LIMIT 1
+            ''')
+            row = await cursor.fetchone()
+            stats['last_load'] = row['timestamp'] if row else None
+
+            # Оценки ответов AI
+            await cursor.execute('''
+                SELECT feedback, COUNT(*) as cnt FROM ai_feedback GROUP BY feedback
+            ''')
+            feedback_rows = await cursor.fetchall()
+            stats['ai_feedback'] = {row['feedback']: row['cnt'] for row in feedback_rows}
+
+        return stats
+
+    async def get_last_conversation_id(self, user_id: int) -> Optional[int]:
+        """Получить ID последнего диалога пользователя"""
+        async with self.conn.cursor() as cursor:
+            await cursor.execute('''
+                SELECT conversation_id FROM ai_conversations
+                WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1
+            ''', (user_id,))
+            row = await cursor.fetchone()
+            return row['conversation_id'] if row else None
+
+    async def save_ai_message(self, user_id: int, message: str, response: str):
+        """Сохранение сообщения пользователя и ответа AI в историю диалога"""
+        async with self.conn.cursor() as cursor:
+            await cursor.execute('''
+                INSERT INTO ai_conversations (user_id, message, response)
+                VALUES (?, ?, ?)
+            ''', (user_id, message, response))
+            await self.conn.commit()
+
+    async def get_conversation_history(self, user_id: int, limit: int = 10) -> List[Dict]:
+        """Получение последних N пар (сообщение / ответ) из истории диалога пользователя.
+        Возвращает в хронологическом порядке (сначала старые)."""
+        async with self.conn.cursor() as cursor:
+            await cursor.execute('''
+                SELECT message, response FROM ai_conversations
+                WHERE user_id = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            ''', (user_id, limit))
+            rows = await cursor.fetchall()
+        # Разворачиваем: получили DESC, нужен ASC для промпта
+        return [dict(row) for row in reversed(rows)]
+
     async def close(self):
         """Закрытие соединения с базой данных"""
         if self.conn:

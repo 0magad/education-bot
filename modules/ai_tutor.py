@@ -214,10 +214,22 @@ class AITutor:
         
         return None
     
+    def _get_specialization(self) -> list:
+        """Получить список специализаций из конфига или TUTOR_SPECIALIZATION по умолчанию."""
+        try:
+            from config import Config
+            spec = Config.load_organization_config().get('features', {}).get('tutor', {}).get('specialization', [])
+            if spec:
+                return spec
+        except Exception:
+            pass
+        return TUTOR_SPECIALIZATION
+
     def _create_system_prompt(self, user_group: Optional[str] = None) -> str:
         """Создание системного промпта для AI"""
+        specialization = self._get_specialization()
         base_prompt = f"""Ты - опытный репетитор и помощник образовательного центра. Твоя специализация — следующие направления:
-{chr(10).join('- ' + s for s in TUTOR_SPECIALIZATION)}
+{chr(10).join('- ' + s for s in specialization)}
 
 Ты помогаешь учащимся именно по этим предметам и темам. Отвечай развёрнуто, но по существу. Если вопрос вне твоей специализации, вежливо предложи сформулировать его в рамках одного из направлений выше.
 
@@ -239,15 +251,24 @@ class AITutor:
         
         return base_prompt
     
-    async def _call_groq(self, system_prompt: str, user_message: str) -> str:
+    @staticmethod
+    def _build_messages(system_prompt: str, user_message: str, history=None) -> list:
+        """Собрать список сообщений для API с учётом истории диалога."""
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            for turn in history:
+                messages.append({"role": "user", "content": turn['message']})
+                messages.append({"role": "assistant", "content": turn['response']})
+        messages.append({"role": "user", "content": user_message})
+        return messages
+
+    async def _call_groq(self, system_prompt: str, user_message: str, history=None) -> str:
         """Вызов Groq API"""
         try:
+            messages = self._build_messages(system_prompt, user_message, history)
             response = await self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
+                messages=messages,
                 temperature=0.7,
                 max_tokens=2000
             )
@@ -256,26 +277,28 @@ class AITutor:
             logger.error(f"Ошибка Groq API: {e}")
             raise
     
-    async def _call_gemini(self, system_prompt: str, user_message: str) -> str:
-        """Вызов Google Gemini API"""
+    async def _call_gemini(self, system_prompt: str, user_message: str, history=None) -> str:
+        """Вызов Google Gemini API (не поддерживает roles напрямую — история добавляется в промпт)."""
         try:
-            # Gemini использует другой формат
-            full_prompt = f"{system_prompt}\n\nВопрос ученика: {user_message}"
+            full_prompt = system_prompt
+            if history:
+                full_prompt += "\n\nИстория диалога:\n"
+                for turn in history:
+                    full_prompt += f"Пользователь: {turn['message']}\nАссистент: {turn['response']}\n"
+            full_prompt += f"\nВопрос ученика: {user_message}"
             response = await self.client.generate_content_async(full_prompt)
             return response.text.strip()
         except Exception as e:
             logger.error(f"Ошибка Gemini API: {e}")
             raise
     
-    async def _call_openai(self, system_prompt: str, user_message: str) -> str:
+    async def _call_openai(self, system_prompt: str, user_message: str, history=None) -> str:
         """Вызов OpenAI API"""
         try:
+            messages = self._build_messages(system_prompt, user_message, history)
             response = await self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
+                messages=messages,
                 temperature=0.7,
                 max_tokens=1000
             )
@@ -284,26 +307,26 @@ class AITutor:
             logger.error(f"Ошибка OpenAI API: {e}")
             raise
     
-    async def _call_ollama(self, system_prompt: str, user_message: str) -> str:
+    async def _call_ollama(self, system_prompt: str, user_message: str, history=None) -> str:
         """Вызов Ollama API (локальная модель)"""
+        # Собираем список сообщений один раз — используется в обоих путях (HTTP и sync Client)
+        ollama_messages = self._build_messages(system_prompt, user_message, history)
+
         try:
             import asyncio
             import aiohttp
             import json
-            
+
             # Пробуем использовать прямой HTTP запрос через aiohttp (полностью асинхронный)
             try:
                 logger.info(f"Подключение к Ollama через HTTP: {self.base_url}, модель: {self.model}")
-                
+
                 async with aiohttp.ClientSession() as session:
                     # Формируем запрос к Ollama API
                     url = f"{self.base_url}/api/chat"
                     payload = {
                         "model": self.model,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_message}
-                        ],
+                        "messages": ollama_messages,
                         "options": {
                             "temperature": 0.7,
                             "num_predict": 2000
@@ -394,10 +417,7 @@ class AITutor:
                 logger.info(f"Отправка запроса к модели {model_to_use}")
                 response = client.chat(
                     model=model_to_use,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message}
-                    ],
+                    messages=ollama_messages,
                     options={
                         "temperature": 0.7,
                         "num_predict": 2000
@@ -512,21 +532,27 @@ class AITutor:
             raise
     
     async def process_question(
-        self, 
-        question: str, 
-        user_context: Optional[Dict] = None
+        self,
+        question: str,
+        user_context: Optional[Dict] = None,
+        history: Optional[list] = None,
+        raise_on_error: bool = False
     ) -> str:
         """
-        Обработка вопроса пользователя
-        
+        Обработка вопроса пользователя.
+
         Args:
             question: Вопрос пользователя
-            user_context: Контекст пользователя (класс, история и т.д.)
-            
+            user_context: Контекст пользователя (группа, имя и т.д.)
+            history: Список предыдущих пар {'message': ..., 'response': ...}
+            raise_on_error: Если True — пробрасывает исключение при ошибке AI,
+                            вместо возврата строки с ошибкой (нужно для fallback).
         Returns:
             Ответ репетитора
         """
         if not self.initialized or not self.client:
+            if raise_on_error:
+                raise RuntimeError(f"AI провайдер '{self.provider}' не инициализирован")
             if self.provider == 'ollama':
                 is_local = 'localhost' in self.base_url or '127.0.0.1' in self.base_url
                 if is_local:
@@ -540,10 +566,10 @@ class AITutor:
                 else:
                     return (
                         "🤖 AI-репетитор временно недоступен.\n\n"
-                        f"Провайдер: {self.provider} (удаленный)\n"
+                        f"Провайдер: {self.provider} (удалённый)\n"
                         f"Адрес сервера: {self.base_url}\n\n"
                         "Проверьте:\n"
-                        "1. Что Ollama запущен на удаленном компьютере\n"
+                        "1. Что Ollama запущен на удалённом компьютере\n"
                         "2. Что сервер доступен по сети\n"
                         f"3. Что модель {self.model} установлена на сервере\n\n"
                         "📖 Инструкция: REMOTE_OLLAMA_SETUP.md"
@@ -558,53 +584,78 @@ class AITutor:
         
         if not question or not question.strip():
             return "Пожалуйста, задай свой вопрос! 📚"
-        
+
         try:
-            # Получаем группу пользователя из контекста
-            user_group = None
-            if user_context:
-                user_group = user_context.get('group_name')
-            
-            # Формируем системный промпт
+            import asyncio as _asyncio
+
+            # Контекст пользователя
+            user_group = user_context.get('group_name') if user_context else None
+
+            # Системный промпт
             system_prompt = self._create_system_prompt(user_group)
-            
-            # Определяем, это математический вопрос или нет
+
+            # Доп. контекст для математических задач
             is_math = self._is_math_question(question)
-            
-            # Дополнительный контекст для математических задач
             user_message = question
             if is_math:
                 math_expr = self._extract_math_expression(question)
                 if math_expr:
                     user_message = f"{question}\n\nПокажи пошаговое решение."
-            
-            # Вызываем соответствующий API
-            if self.provider == 'groq':
-                answer = await self._call_groq(system_prompt, user_message)
-            elif self.provider == 'gemini':
-                answer = await self._call_gemini(system_prompt, user_message)
-            elif self.provider == 'openai':
-                answer = await self._call_openai(system_prompt, user_message)
-            elif self.provider == 'ollama':
-                answer = await self._call_ollama(system_prompt, user_message)
-            else:
-                return "Неизвестный провайдер AI"
-            
+
+            # Параметры повторных попыток (только для Ollama, 5.4)
+            try:
+                from config import Config
+                tutor_cfg = Config.load_organization_config().get('features', {}).get('tutor', {})
+                max_retries = int(tutor_cfg.get('ollama_retries', 2)) if self.provider == 'ollama' else 0
+                retry_delay = float(tutor_cfg.get('ollama_retry_delay', 3))
+            except Exception:
+                max_retries = 2 if self.provider == 'ollama' else 0
+                retry_delay = 3.0
+
+            # Вызов API с поддержкой повторных попыток
+            last_error = None
+            for attempt in range(max_retries + 1):
+                try:
+                    if self.provider == 'groq':
+                        answer = await self._call_groq(system_prompt, user_message, history)
+                    elif self.provider == 'gemini':
+                        answer = await self._call_gemini(system_prompt, user_message, history)
+                    elif self.provider == 'openai':
+                        answer = await self._call_openai(system_prompt, user_message, history)
+                    elif self.provider == 'ollama':
+                        answer = await self._call_ollama(system_prompt, user_message, history)
+                    else:
+                        return "Неизвестный провайдер AI"
+                    last_error = None
+                    break  # успех — выходим из цикла
+                except ConnectionError as e:
+                    last_error = e
+                    if attempt < max_retries:
+                        logger.warning(
+                            f"Ollama недоступен (попытка {attempt + 1}/{max_retries + 1}): {e}. "
+                            f"Повтор через {retry_delay:.0f}с..."
+                        )
+                        await _asyncio.sleep(retry_delay)
+                    else:
+                        raise
+            if last_error:
+                raise last_error
+
             # Добавляем префикс для математических задач
             if is_math:
                 answer = f"📐 Решение задачи:\n\n{answer}"
-            
+
             logger.info(f"AI ({self.provider}) ответил на вопрос (длина: {len(answer)} символов)")
             return answer
-            
+
         except ConnectionError as e:
-            logger.error(f"Ошибка подключения к Ollama: {e}", exc_info=True)
+            logger.error(f"Ошибка подключения к AI ({self.provider}): {e}", exc_info=True)
+            if raise_on_error:
+                raise
             is_local = 'localhost' in self.base_url or '127.0.0.1' in self.base_url
             error_msg = str(e)
-            # Если сообщение уже содержит подробную информацию, просто возвращаем его
             if "📋" in error_msg or "❌" in error_msg:
                 return error_msg
-            # Иначе формируем стандартное сообщение
             if is_local:
                 return (
                     "🤖 Ошибка подключения к Ollama.\n\n"
@@ -616,11 +667,11 @@ class AITutor:
                 )
             else:
                 return (
-                    "🤖 Ошибка подключения к удаленному Ollama серверу.\n\n"
+                    "🤖 Ошибка подключения к удалённому Ollama серверу.\n\n"
                     f"{error_msg}\n\n"
                     f"Адрес сервера: {self.base_url}\n\n"
                     "Проверьте:\n"
-                    "1. Что Ollama запущен на удаленном компьютере\n"
+                    "1. Что Ollama запущен на удалённом компьютере\n"
                     "2. Что сервер настроен для работы по сети\n"
                     "3. Что порт 11434 открыт в файрволе\n"
                     "4. Что ноутбук и компьютер в одной сети\n\n"
@@ -628,6 +679,8 @@ class AITutor:
                 )
         except Exception as e:
             logger.error(f"Ошибка при обработке вопроса AI: {e}", exc_info=True)
+            if raise_on_error:
+                raise
             return (
                 "😔 Извини, произошла ошибка при обработке твоего вопроса.\n\n"
                 "Попробуй переформулировать вопрос или обратись позже."
