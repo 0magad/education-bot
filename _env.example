@@ -1,0 +1,24 @@
+# Токен Telegram бота (обязательно)
+BOT_TOKEN=ваш_токен_бота
+
+# === TASK 3.1: Organization Config ===
+ORGANIZATION_NAME=YourOrgName
+ORGANIZATION_DESCRIPTION=Образовательный центр на базе Telegram-бота
+SUPPORT_CONTACT=@support_username
+LOGO_PATH=assets/logo.png
+
+# Провайдер AI
+AI_PROVIDER=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.1
+AI_API_KEY=
+GEMINI_API_KEY=
+GROQ_API_KEY=
+AI_MODEL=
+
+# === TASK 3.4: Multi-DB ===
+DB_PATH=data/bot.db
+DB_PATH_ANALYTICS=data/analytics.db
+
+# Логирование
+LOG_LEVEL=INFO

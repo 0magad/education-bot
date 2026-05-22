@@ -61,7 +61,7 @@ class EducationBot:
             base_url=base_url
         )
         self.application.bot_data['ai_tutor'] = ai_tutor
-        
+
         if ai_tutor.initialized:
             logger.info(f"AI-репетитор успешно инициализирован (провайдер: {provider}, модель: {model})")
         else:
@@ -72,6 +72,36 @@ class EducationBot:
             else:
                 logger.warning(f"AI-репетитор не инициализирован (провайдер: {provider}, отсутствует API ключ)")
                 logger.info("Для настройки бесплатных моделей см. FREE_AI_SETUP.md")
+
+        # Инициализируем резервный AI провайдер (TASK 5.4 / fallback)
+        fallback_provider = self.config.FALLBACK_AI_PROVIDER.lower() if self.config.FALLBACK_AI_PROVIDER else None
+        if fallback_provider and fallback_provider != provider:
+            fallback_api_key = None
+            fallback_base_url = None
+            fallback_model = None
+
+            if fallback_provider == 'groq':
+                fallback_api_key = self.config.GROQ_API_KEY or self.config.AI_API_KEY
+            elif fallback_provider == 'gemini':
+                fallback_api_key = self.config.GEMINI_API_KEY
+            elif fallback_provider == 'openai':
+                fallback_api_key = self.config.AI_API_KEY
+            elif fallback_provider == 'ollama':
+                fallback_base_url = self.config.OLLAMA_BASE_URL
+                fallback_model = self.config.OLLAMA_MODEL
+
+            fallback_tutor = AITutor(
+                provider=fallback_provider,
+                api_key=fallback_api_key if fallback_api_key else None,
+                model=fallback_model,
+                base_url=fallback_base_url
+            )
+
+            if fallback_tutor.initialized:
+                self.application.bot_data['fallback_ai_tutor'] = fallback_tutor
+                logger.info(f"Резервный AI-репетитор инициализирован (провайдер: {fallback_provider})")
+            else:
+                logger.warning(f"Резервный AI провайдер не инициализирован: {fallback_provider}")
         
         # Устанавливаем бота в планировщик
         self.scheduler.set_bot(self.application.bot)

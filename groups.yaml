@@ -1,0 +1,114 @@
+# groups.yaml — привязка групп (классов) к организации
+# TASK 3.2: Список групп читается из конфига или БД при первом запуске
+
+# Структура групп для организации
+# Может быть переопределена в organization.yaml
+
+groups:
+  # Основные группы (классы)
+  elementary:
+    name: "Начальная школа"
+    level: 1
+    items:
+      - name: "1A"
+        short_name: "1А"
+        teacher: "Иванова И.И."
+        room: "101"
+      - name: "1B"
+        short_name: "1Б"
+        teacher: "Петрова П.П."
+        room: "102"
+      - name: "1V"
+        short_name: "1В"
+        teacher: "Сидорова С.С."
+        room: "103"
+      - name: "2A"
+        short_name: "2А"
+        teacher: "Васильева В.В."
+        room: "201"
+      - name: "2B"
+        short_name: "2Б"
+        teacher: "Александрова А.А."
+        room: "202"
+      - name: "2V"
+        short_name: "2В"
+        teacher: "Козлова К.К."
+        room: "203"
+
+  middle:
+    name: "Средняя школа"
+    level: 2
+    items:
+      - name: "3A"
+        short_name: "3А"
+        teacher: "Морозова М.М."
+        room: "301"
+      - name: "3B"
+        short_name: "3Б"
+        teacher: "Волкова В.В."
+        room: "302"
+      - name: "3V"
+        short_name: "3В"
+        teacher: "Соколова С.С."
+        room: "303"
+      - name: "4A"
+        short_name: "4А"
+        teacher: "Лебедева Л.Л."
+        room: "401"
+      - name: "4B"
+        short_name: "4Б"
+        teacher: "Орлова О.О."
+        room: "402"
+      - name: "4V"
+        short_name: "4В"
+        teacher: "Соловьёва Сл.Сл."
+        room: "403"
+
+  high:
+    name: "Старшая школа"
+    level: 3
+    items:
+      - name: "5A"
+        short_name: "5А"
+        teacher: "Новикова Н.Н."
+        room: "501"
+      - name: "5B"
+        short_name: "5Б"
+        teacher: "Калинина К.К."
+        room: "502"
+
+  special:
+    name: "Специальные группы"
+    level: 0
+    items:
+      - name: "Руководство"
+        short_name: "RU"
+        teacher: "Администрация"
+        room: "1"
+      - name: "Поддержка"
+        short_name: "SUP"
+        teacher: "Support Team"
+        room: "0"
+      - name: "Тестирование"
+        short_name: "TEST"
+        teacher: "Test User"
+        room: "999"
+
+# Права доступа для групп (опционально)
+access_control:
+  # Может ли группа видеть расписание других групп
+  can_view_other_schedules: false
+  
+  # Может ли администратор видеть сообщения пользователей
+  admin_can_view_messages: true
+  
+  # Может ли группа использовать AI-репетитор
+  can_use_tutor: true
+
+# Шаблон для новой группы
+template:
+  name: "Новая группа"
+  short_name: ""
+  teacher: "Не назначен"
+  room: "0"
+  level: 0
